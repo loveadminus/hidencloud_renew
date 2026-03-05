@@ -194,6 +194,16 @@ class HidenCloudBot:
             return unquote(xsrf)
         return None
 
+    def warmup_session(self):
+        """预热会话：先访问首页让 cloudscraper 完成 Cloudflare 挑战"""
+        self.log("🔄 预热会话，访问首页以通过 Cloudflare 验证...")
+        try:
+            res = self.session.get(self.base_url, timeout=30)
+            self.log(f"预热完成，状态码: {res.status_code}，URL: {res.url}")
+            sleep_random(1000, 2000)
+        except Exception as e:
+            self.log(f"预热请求异常: {e}")
+
     def request_get(self, url):
         """发送 GET 请求"""
         full_url = urljoin(self.base_url, url)
@@ -235,7 +245,7 @@ class HidenCloudBot:
         self.log("⚠️ 页面中未找到 csrf-token meta 标签")
         return False
 
-    def init(self):
+    def init(self, retry=0):
         self.log("正在验证登录状态...")
         try:
             res = self.request_get('/dashboard')
@@ -243,10 +253,19 @@ class HidenCloudBot:
                 self.log("❌ 当前 Cookie 已失效")
                 return False
             soup = BeautifulSoup(res.text, 'html.parser')
-            log_print(f"👀 [调试] 网页标题是: {soup.title.string if soup.title else '无标题'}")
+            title = soup.title.string if soup.title else '无标题'
+            log_print(f"👀 [调试] 网页标题是: {title}")
 
             if not self.update_csrf_from_html(res.text):
-                self.log("❌ 无法从 Dashboard 获取 CSRF token")
+                # 打印页面内容辅助调试
+                self.log(f"👀 [调试] 页面响应URL: {res.url}")
+                self.log(f"👀 [调试] 页面内容前500字: {res.text[:500]}")
+                if retry < 2:
+                    self.log(f"🔄 可能是 Cloudflare 挑战页面，{5 + retry * 3}秒后重试 (第{retry+1}次)...")
+                    time.sleep(5 + retry * 3)
+                    self.warmup_session()
+                    return self.init(retry=retry + 1)
+                self.log("❌ 多次重试后仍无法获取 CSRF token")
                 return False
 
             self.services = []
@@ -456,9 +475,12 @@ if __name__ == '__main__':
     log_print(f"\n=== HidenCloud 续期脚本启动 (Python版 - CSRF修复) ===")
     for i, cookie in enumerate(cookies_list):
         bot = HidenCloudBot(cookie, i)
+        # 先预热会话以通过 Cloudflare
+        bot.warmup_session()
         success = bot.init()
         if not success:
             bot.reset_to_env(cookie)
+            bot.warmup_session()
             success = bot.init()
         if success:
             for service in bot.services:
